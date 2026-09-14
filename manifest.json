@@ -17,6 +17,13 @@
       "js": ["content.js"],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["mic-gain-hook.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
     }
   ]
 }

@@ -73,12 +73,17 @@
   }
 
   async function init() {
+    let micGain = 1;
     try {
       const res = await chrome.runtime.sendMessage({ type: "CONTENT_READY" });
       if (res && typeof res.volume === "number") currentVolume = res.volume;
+      if (res && typeof res.micGain === "number") micGain = res.micGain;
     } catch (e) {
       // Background not reachable (e.g. extension reloading) — default to 1.
     }
+    // Seed the MAIN-world mic hook even when micGain is the default 1, so
+    // its internal currentGain always matches what background thinks it is.
+    window.postMessage({ __tac: true, type: "SET_MIC_GAIN", gain: micGain }, "*");
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", start);
     } else {
@@ -90,6 +95,23 @@
     if (msg.type === "SET_VOLUME") {
       setVolume(msg.volume);
       sendResponse({ ok: true });
+    } else if (msg.type === "SET_MIC_GAIN") {
+      window.postMessage(
+        { __tac: true, type: "SET_MIC_GAIN", gain: msg.gain },
+        "*",
+      );
+      sendResponse({ ok: true });
+    }
+  });
+
+  // Bridge for the MAIN-world mic-gain-hook.js, which has no chrome.* access.
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || !event.data?.__tac) return;
+    if (
+      event.data.type === "MIC_CAPTURE_STARTED" ||
+      event.data.type === "MIC_CAPTURE_STOPPED"
+    ) {
+      chrome.runtime.sendMessage({ type: event.data.type }).catch(() => {});
     }
   });
 

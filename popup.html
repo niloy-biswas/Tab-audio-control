@@ -75,9 +75,15 @@
 
       .track {
         display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 7px 16px;
+      }
+
+      .track-line {
+        display: flex;
         align-items: center;
         gap: 10px;
-        padding: 7px 16px;
       }
 
       .track img {
@@ -96,6 +102,10 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+      }
+
+      .track-mic-label {
+        flex: none;
       }
 
       .track-pct {
@@ -173,6 +183,11 @@
       <hr />
       <div id="empty">No tabs playing audio right now.</div>
       <div id="tabList"></div>
+      <hr />
+      <h1>Microphone</h1>
+      <div class="track">
+        <div class="track-line" id="micRow"></div>
+      </div>
     </div>
     <script src="popup.js"></script>
   </body>
