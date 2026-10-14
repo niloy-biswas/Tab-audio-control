@@ -79,3 +79,53 @@ Whether `selectAudioOutput()` grants are per-device or blanket-per-origin is unc
 4. Confirm both play concurrently through their assigned device with correct independent volumes from the existing slider.
 5. Unplug/disconnect one chosen device mid-playback and confirm that tab falls back to system default audibly, without affecting the other tab.
 6. Close and reopen one of the tabs, confirm it starts back at System Default (no persistence leak).
+
+---
+
+# Global microphone input device selection
+
+## Context
+Alongside the shipped mic-gain control (one global gain applied to whatever tab is capturing mic), the user also wants to choose *which physical microphone* is used — e.g. default to the Mac's built-in mic, but switch to a connected headset's mic when preferred — from the same "Mic" section in the popup. Confirmed global scope (same as gain), not per-tab: only one microphone reaches the user's mouth at a time.
+
+## Feasibility / constraints
+- No special permission needed beyond the microphone permission a call tab's own `getUserMedia` call already obtained for that origin — unlike output-device routing above, there is no separate permission or user-gesture requirement for picking a different input device. Once mic permission is granted for an origin, `navigator.mediaDevices.enumerateDevices()` returns labeled `kind: "audioinput"` entries, and further `getUserMedia({audio: {deviceId: {exact: id}}})` calls for that origin succeed without a new prompt.
+- `mic-gain-hook.js` already builds, per captured track, a `MediaStreamSource → GainNode → MediaStreamDestination` graph and hands the call app the **destination**'s track, not the raw mic track. Switching input device is therefore just swapping the graph's *source*: request a fresh raw stream from the chosen device via the original (unwrapped) `getUserMedia`, connect its track into the *same* `GainNode`, disconnect and stop the old source's track. The destination track already in use by the call/RTCPeerConnection never changes — no renegotiation, no rejoin, no interruption visible to the call app.
+- Device *labels* require permission already granted somewhere this session — if no tab has captured mic yet, the popup's device list may be empty. Handled by showing "System Default" as a placeholder until some tab grants permission and reports real devices.
+
+## Design
+
+### mic-gain-hook.js
+- Extend the per-track registry to `{ trackId, gainNode, sourceNode, ctx }` (was `{gainNode, ctx}`) so the source can be swapped later.
+- New handler for a `SET_MIC_DEVICE` postMessage: for every active entry, call the **original**, unwrapped `getUserMedia({audio: {deviceId: {exact: deviceId}}})` (bypassing our own override to avoid recursion), build a new `MediaStreamSource` from the returned track, connect it to the existing `gainNode`, then disconnect the old source and `stop()` its raw track. Track `currentDeviceId`.
+- `enumerateAndReport()`: calls `enumerateDevices()`, filters `audioinput`, posts `MIC_DEVICES_UPDATED` with `{devices: [{deviceId, label}], activeId: currentDeviceId}`. Runs right after the first successful capture (permission is now definitely granted) and again on `navigator.mediaDevices.ondevicechange` (covers headset plug/unplug).
+- If the active device disappears (`devicechange` fires and it's no longer in the enumerated list): fall back automatically to `getUserMedia({audio: true})` (system default), swap source the same way, and report the fallback via the same `MIC_DEVICES_UPDATED` message so the popup's selection updates itself.
+
+### content.js bridge
+- Relay `MIC_DEVICES_UPDATED` up to background, same pattern as the existing `MIC_CAPTURE_STARTED` relay.
+- Relay `SET_MIC_DEVICE` down from background into the page, same shape as the existing `SET_MIC_GAIN` relay.
+
+### background.js
+- New state: `let micDevices = { devices: [], activeId: null }`, `let preferredMicDeviceId = null`, and `let lastMicDeviceTabId = null` (the tab whose report is authoritative — the one currently on a call, same "whichever tab is capturing" reasoning already used for gain).
+- `MIC_DEVICES_UPDATED` (content→bg): store into `micDevices`, remember `sender.tab.id` as `lastMicDeviceTabId`.
+- `POPUP_SET_MIC_DEVICE` (popup→bg): `preferredMicDeviceId = msg.deviceId`; relay `SET_MIC_DEVICE` to `lastMicDeviceTabId` only if one is currently capturing (not broadcast to every tab like gain — swapping a device on a tab with no active capture is meaningless, and could even start one unexpectedly).
+- Extend the `CONTENT_READY` response to also include `preferredMicDeviceId`, mirroring how `micGain` already seeds new captures — so a *new* call started after the preference was set opens directly on the right device instead of the system default.
+- `GET_ALL_MIC_STATE` extended to also return `{ devices: micDevices.devices, activeId: micDevices.activeId }`.
+
+### popup.js/html
+- Extend the existing global "Mic" section (below the gain slider) with a compact `<select>` of input devices, populated from `GET_ALL_MIC_STATE`. Selecting one sends `POPUP_SET_MIC_DEVICE`.
+- Empty `devices` list (no capture has happened yet this session) → show "System Default" as the only option; repopulates once some tab has captured mic at least once.
+
+## Edge cases
+- No tab currently capturing when the user changes the preference → nothing to apply live; stored as `preferredMicDeviceId`, applied via `CONTENT_READY` the next time any tab's `getUserMedia` fires.
+- Chosen device unplugged mid-call → automatic fallback to system default (see mic-gain-hook.js above); popup dropdown reflects the change on next open.
+- Two tabs on calls simultaneously → device swap only targets `lastMicDeviceTabId`, a real limitation of the confirmed global-scope decision — same tradeoff already accepted for gain, not solved here.
+
+## Known unverified risk
+Whether calling `getUserMedia` again for a different `deviceId`, well after the original permission grant and with no fresh click, is allowed without re-prompting is expected per spec (a gesture is required only for the *original* grant, not a later device switch) but should be confirmed empirically once implemented — same category of assumption already flagged for the gain feature's injection timing.
+
+## Verification
+1. Reload extension. Join a call in a tab with two mic-capable devices connected (e.g. built-in mic + USB headset).
+2. Open popup, confirm the Mic section's device dropdown lists both, with the one currently in use pre-selected.
+3. Switch selection; confirm (via another participant or loopback) the audio source changes without dropping or rejoining the call.
+4. Unplug the active device mid-call; confirm automatic fallback to default and the dropdown updates to reflect it.
+5. With no call active anywhere, change the device preference, then join a call; confirm the new capture starts on the chosen device from the start.
