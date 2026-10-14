@@ -1,6 +1,8 @@
 const tabVolumes = new Map();
 let micGain = 1; // applies to mic capture on every site, not per tab
 const micActiveTabs = new Set(); // tabIds with a currently live mic capture
+const tabSinks = new Map(); // tabId -> sinkId ('' = system default)
+const tabSinkDevices = new Map(); // tabId -> {granted, devices, supported} — last known, used as a fallback if the live relay below fails
 
 async function broadcastMicGain() {
   const tabs = await chrome.tabs.query({});
@@ -18,6 +20,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({
         volume: tabVolumes.get(tabId) ?? 1,
         micGain,
+        sinkId: tabSinks.get(tabId) ?? "",
       });
       return true;
     }
@@ -66,10 +69,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (tabId != null) micActiveTabs.delete(tabId);
       return false;
     }
+    case "GET_ALL_SINKS": {
+      sendResponse(Object.fromEntries(tabSinks));
+      return true;
+    }
+    case "POPUP_GET_DEVICES": {
+      const fallback = () =>
+        tabSinkDevices.get(msg.tabId) ?? {
+          granted: false,
+          devices: [],
+          supported: true,
+        };
+      chrome.tabs
+        .sendMessage(msg.tabId, { type: "REQUEST_DEVICE_LIST" })
+        .then((res) => sendResponse(res ?? fallback()))
+        .catch(() => sendResponse(fallback()));
+      return true;
+    }
+    case "POPUP_SET_SINK_ID": {
+      tabSinks.set(msg.tabId, msg.sinkId);
+      chrome.tabs
+        .sendMessage(msg.tabId, { type: "SET_SINK_ID", sinkId: msg.sinkId })
+        .catch(() => {});
+      sendResponse({ ok: true });
+      return true;
+    }
+    case "POPUP_REQUEST_GRANT": {
+      chrome.tabs
+        .sendMessage(msg.tabId, { type: "SHOW_SINK_PICKER" })
+        .catch(() => {});
+      sendResponse({ ok: true });
+      return true;
+    }
+    case "SINK_DEVICES_UPDATED": {
+      const tabId = sender.tab?.id;
+      if (tabId != null) {
+        tabSinkDevices.set(tabId, {
+          granted: msg.granted,
+          devices: msg.devices,
+          supported: msg.supported,
+        });
+      }
+      return false;
+    }
+    case "SINK_DEVICE_UNAVAILABLE": {
+      const tabId = sender.tab?.id;
+      if (tabId != null) tabSinks.set(tabId, "");
+      return false;
+    }
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabVolumes.delete(tabId);
   micActiveTabs.delete(tabId);
+  tabSinks.delete(tabId);
+  tabSinkDevices.delete(tabId);
 });

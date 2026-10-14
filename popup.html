@@ -122,6 +122,46 @@
         min-width: 72px;
       }
 
+      .device-control {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .device-select {
+        flex: 1 1 auto;
+        min-width: 0;
+        font: 12.5px -apple-system, system-ui, sans-serif;
+        color: #1d1d1f;
+        background: rgba(0, 0, 0, 0.05);
+        border: none;
+        border-radius: 6px;
+        padding: 4px 6px;
+      }
+
+      .grant-pill {
+        flex: none;
+        font: 600 11.5px -apple-system, system-ui, sans-serif;
+        color: #fff;
+        background: #007aff;
+        border: none;
+        border-radius: 999px;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+
+      .grant-hint {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 11px;
+        color: rgba(60, 60, 67, 0.45);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
       input[type="range"] {
         -webkit-appearance: none;
         appearance: none;
