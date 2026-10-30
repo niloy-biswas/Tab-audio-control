@@ -35,6 +35,8 @@ function buildSlider(initialValue, onChange) {
   return { sliderWrap, pct };
 }
 
+const UNREACHABLE_HINT = "Refresh this tab to enable controls";
+
 function buildHint(text) {
   const hint = document.createElement("span");
   hint.className = "grant-hint";
@@ -73,14 +75,12 @@ function buildDeviceLine(tab, sinkId) {
     );
   }
 
-  function renderUnsupported() {
+  function renderHint(text) {
     controlWrap.innerHTML = "";
-    controlWrap.append(
-      buildHint("Output device choice isn't allowed on this site"),
-    );
+    controlWrap.append(buildHint(text));
   }
 
-  function renderSelect(devices) {
+  function renderSelect(devices, canAdd) {
     controlWrap.innerHTML = "";
     const select = document.createElement("select");
     select.className = "device-select";
@@ -97,10 +97,12 @@ function buildDeviceLine(tab, sinkId) {
       select.appendChild(opt);
     });
 
-    const addOpt = document.createElement("option");
-    addOpt.value = "__add__";
-    addOpt.textContent = "Add device…";
-    select.appendChild(addOpt);
+    if (canAdd) {
+      const addOpt = document.createElement("option");
+      addOpt.value = "__add__";
+      addOpt.textContent = "Add device…";
+      select.appendChild(addOpt);
+    }
 
     select.value = devices.some((d) => d.deviceId === sinkId) ? sinkId : "";
 
@@ -126,12 +128,15 @@ function buildDeviceLine(tab, sinkId) {
 
   chrome.runtime
     .sendMessage({ type: "POPUP_GET_DEVICES", tabId: tab.id })
-    .then(({ granted, devices, supported }) => {
-      if (!supported) renderUnsupported();
-      else if (granted && devices.length > 0) renderSelect(devices);
-      else renderGrant();
+    .then(({ granted, devices, supported, reachable = true }) => {
+      // Chrome has no selectAudioOutput(); there, a site's mic permission is
+      // what unlocks labelled outputs, so check granted before supported.
+      if (granted && devices.length > 0) renderSelect(devices, supported);
+      else if (!reachable) renderHint(UNREACHABLE_HINT);
+      else if (supported) renderGrant();
+      else renderHint("Allow mic on this site to list outputs");
     })
-    .catch(renderGrant);
+    .catch(() => renderHint(UNREACHABLE_HINT));
 
   return line;
 }

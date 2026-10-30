@@ -1,4 +1,14 @@
 (() => {
+  // Background also injects this into already-open tabs on install/reload,
+  // so a tab can receive it twice. Bail only if a *live* instance exists —
+  // an orphan from before the reload reports itself dead and tears down.
+  if (window.__tacContentAlive?.()) return;
+  let dead = false;
+  function contextLost() {
+    return dead || !chrome.runtime?.id;
+  }
+  window.__tacContentAlive = () => !contextLost();
+
   let currentVolume = 1;
   let currentSinkId = "";
   const hookedEls = new WeakSet();
@@ -57,6 +67,9 @@
     // push it back to the popup, instead of fighting it — that way either
     // control can drive the other instead of conflicting.
     el.addEventListener("volumechange", () => {
+      // An orphan must not revert the live instance's change before its
+      // next scan notices and tears down.
+      if (contextLost()) return;
       if (Math.abs(el.volume - currentVolume) > 0.001) {
         currentVolume = el.volume;
         document
@@ -84,7 +97,21 @@
     });
   }
 
+  // Extension was reloaded under this tab: stop touching media so this stale
+  // instance doesn't fight the freshly injected one (e.g. resetting sinkId).
+  function teardown() {
+    dead = true;
+    observer.disconnect();
+    clearInterval(scanTimer);
+    navigator.mediaDevices?.removeEventListener(
+      "devicechange",
+      enumerateAndReport,
+    );
+    hidePicker();
+  }
+
   function scan() {
+    if (contextLost()) return teardown();
     const media = [];
     collectMedia(document, media);
     media.forEach(hook);
@@ -199,6 +226,7 @@
   }
 
   observer = new MutationObserver(scan);
+  let scanTimer;
 
   function start() {
     scan();
@@ -208,7 +236,7 @@
     });
     // Belt-and-braces: a shadow root can be attached with no light-DOM
     // mutation we'd otherwise catch, so also re-scan on a short interval.
-    setInterval(scan, 1000);
+    scanTimer = setInterval(scan, 1000);
 
     // Device enumeration/permission flow is a single per-tab concern —
     // only the top frame drives it, sub-frames just keep routing audio.

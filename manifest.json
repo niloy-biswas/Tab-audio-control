@@ -3,7 +3,8 @@
   "name": "Tab Audio Control",
   "version": "1.0.0",
   "description": "Per-tab volume control, including boost above 100%.",
-  "permissions": ["tabs"],
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Tab Audio Control"

@@ -1,5 +1,9 @@
 (() => {
   if (!navigator.mediaDevices?.getUserMedia) return;
+  // Background re-injects into already-open tabs on install/reload; wrapping
+  // getUserMedia twice would stack two gain stages (gain applied squared).
+  if (window.__tacMicHook) return;
+  Object.defineProperty(window, "__tacMicHook", { value: true });
 
   const gainNodes = new Map(); // trackId -> GainNode
   let liveCount = 0;

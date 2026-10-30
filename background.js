@@ -78,7 +78,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         tabSinkDevices.get(msg.tabId) ?? {
           granted: false,
           devices: [],
-          supported: true,
+          supported: false,
+          reachable: false,
         };
       chrome.tabs
         .sendMessage(msg.tabId, { type: "REQUEST_DEVICE_LIST" })
@@ -118,6 +119,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
   }
+});
+
+// Manifest content scripts only land in tabs loaded *after* the extension
+// is (re)loaded. Without this, a tab already open — e.g. a call in progress —
+// gets no controls at all until it's refreshed, which would end the call.
+chrome.runtime.onInstalled.addListener(async () => {
+  const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+  tabs.forEach((tab) => {
+    const target = { tabId: tab.id, allFrames: true };
+    chrome.scripting
+      .executeScript({ target, files: ["content.js"] })
+      .catch(() => {});
+    chrome.scripting
+      .executeScript({ target, files: ["mic-gain-hook.js"], world: "MAIN" })
+      .catch(() => {});
+  });
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
