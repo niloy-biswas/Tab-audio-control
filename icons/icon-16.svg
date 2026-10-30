@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Toolbar size: no padding, no faint tracks or shadows (they blur to mush at 16px). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3aa3ff"/>
+      <stop offset="1" stop-color="#0062e6"/>
+    </linearGradient>
+  </defs>
+  <rect width="16" height="16" rx="3.5" fill="url(#bg)"/>
+  <g stroke="#fff" stroke-width="1.6" stroke-linecap="round">
+    <line x1="4.5" y1="7" x2="4.5" y2="12.5"/>
+    <line x1="8" y1="9.5" x2="8" y2="12.5"/>
+    <line x1="11.5" y1="5.5" x2="11.5" y2="12.5"/>
+  </g>
+  <g fill="#fff">
+    <circle cx="4.5" cy="6.5" r="1.7"/>
+    <circle cx="8" cy="9" r="1.7"/>
+    <circle cx="11.5" cy="5" r="1.7"/>
+  </g>
+</svg>
