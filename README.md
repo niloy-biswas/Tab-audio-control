@@ -1,6 +1,16 @@
-# Tab Audio Control
+<p align="center">
+  <img src="icons/icon128.png" width="80" alt="">
+</p>
 
-A Chrome extension (Manifest V3) for setting volume and output device per tab, plus one gain control for your microphone.
+<h1 align="center">Tab Audio Control</h1>
+
+<p align="center">
+  A Chrome extension (Manifest V3) for setting volume and output device per tab, plus one gain control for your microphone.
+</p>
+
+<p align="center">
+  <img src="docs/popup.png" width="340" alt="Popup listing three playing tabs: Facebook at 100% on MacBook Pro Speakers, a YouTube video at 55%, and a Messenger call at 40% routed to Bluetooth earbuds, with a microphone slider at the bottom">
+</p>
 
 ## What it does
 
@@ -45,4 +55,6 @@ Tabs that were already open get the extension's scripts added automatically when
 | `mic-gain-hook.js` | Runs in the page's own JS world. Wraps `getUserMedia` with a gain node |
 | `popup.html` / `popup.js` | The popup UI |
 | `icons/` | Extension icon. `icon.svg` is the source for 32/48/128, and `icon-16.svg` is a simpler version for the toolbar |
+| `docs/` | Images used by this README |
+| `PRIVACY.md` | Privacy policy, used as the Chrome Web Store privacy policy URL |
 | `NEXT_BUILD.md` | Design notes for planned features |
