@@ -58,25 +58,63 @@
     applySink(el);
   }
 
+  // Tracks real user input in this frame, so a volume change can be told
+  // apart as the user driving the page's own control (YouTube's slider,
+  // arrow keys) vs. the page's code, e.g. a call app setting a new
+  // participant's <audio> back to 1, which used to blast the call to 100%.
+  const USER_INPUT_WINDOW_MS = 1000;
+  let lastUserInput = 0;
+  let pointerHeld = false; // a slider drag can outlast the window
+  function markInput(e) {
+    if (!e.isTrusted) return;
+    lastUserInput = Date.now();
+    if (e.type === "pointerdown") pointerHeld = true;
+    else if (e.type === "pointerup" || e.type === "pointercancel") {
+      pointerHeld = false;
+    }
+  }
+  ["pointerdown", "pointerup", "pointercancel", "keydown", "wheel"].forEach(
+    (type) =>
+      window.addEventListener(type, markInput, { capture: true, passive: true }),
+  );
+  function userIsActing() {
+    return pointerHeld || Date.now() - lastUserInput < USER_INPUT_WINDOW_MS;
+  }
+
+  // el -> {count, since}: caps reverts so a page that re-asserts its own
+  // volume on every volumechange can't ping-pong with us forever.
+  const MAX_REVERTS_PER_SEC = 5;
+  const reverts = new WeakMap();
+  function canRevert(el) {
+    const now = Date.now();
+    const r = reverts.get(el);
+    if (!r || now - r.since > 1000) {
+      reverts.set(el, { count: 1, since: now });
+      return true;
+    }
+    return ++r.count <= MAX_REVERTS_PER_SEC;
+  }
+
   function hook(el) {
     apply(el);
     if (hookedEls.has(el)) return;
     hookedEls.add(el);
-    // The page's own volume control (e.g. YouTube's slider) touches this
-    // same .volume property. Adopt any drift as the new current value and
-    // push it back to the popup, instead of fighting it — that way either
-    // control can drive the other instead of conflicting.
+    // The page's own volume control touches this same .volume property.
+    // User-driven drift is adopted and pushed back to the popup, so either
+    // control can drive the other; page-driven drift is reverted.
     el.addEventListener("volumechange", () => {
       // An orphan must not revert the live instance's change before its
       // next scan notices and tears down.
       if (contextLost()) return;
-      if (Math.abs(el.volume - currentVolume) > 0.001) {
-        currentVolume = el.volume;
-        document
-          .querySelectorAll("audio, video")
-          .forEach((other) => other !== el && apply(other));
-        notifyBackground({ type: "VOLUME_DRIFTED", volume: currentVolume });
+      if (Math.abs(el.volume - currentVolume) <= 0.001) return;
+      if (!userIsActing()) {
+        // Out of reverts: leave it; the 1s rescan re-applies ours anyway.
+        if (canRevert(el)) el.volume = currentVolume;
+        return;
       }
+      currentVolume = el.volume;
+      allMedia().forEach((other) => other !== el && apply(other));
+      notifyBackground({ type: "VOLUME_DRIFTED", volume: currentVolume });
     });
   }
 
@@ -97,6 +135,12 @@
     });
   }
 
+  function allMedia() {
+    const media = [];
+    collectMedia(document, media);
+    return media;
+  }
+
   // Extension was reloaded under this tab: stop touching media so this stale
   // instance doesn't fight the freshly injected one (e.g. resetting sinkId).
   function teardown() {
@@ -112,23 +156,17 @@
 
   function scan() {
     if (contextLost()) return teardown();
-    const media = [];
-    collectMedia(document, media);
-    media.forEach(hook);
+    allMedia().forEach(hook);
   }
 
   function setVolume(v) {
     currentVolume = v;
-    const media = [];
-    collectMedia(document, media);
-    media.forEach(apply);
+    allMedia().forEach(apply);
   }
 
   function setSinkId(id) {
     currentSinkId = id;
-    const media = [];
-    collectMedia(document, media);
-    media.forEach(apply);
+    allMedia().forEach(apply);
   }
 
   // The routed device is gone — fall back to system default and tell
