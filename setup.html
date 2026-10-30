@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Tab Audio Control setup</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div id="panel" style="margin: 10vh auto">
+      <h1>Tab Audio Control</h1>
+      <hr />
+      <div class="note" id="status">Asking for microphone access…</div>
+      <div class="note">
+        Chrome only shows output device names to the extension once it has
+        microphone permission. This page asks once and stops the microphone
+        right away. Nothing is recorded.
+      </div>
+    </div>
+    <script src="setup.js"></script>
+  </body>
+</html>

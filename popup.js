@@ -4,21 +4,21 @@ const micRowEl = document.getElementById("micRow");
 
 let currentIds = new Set();
 
-function setFill(slider, pctValue) {
-  slider.style.setProperty("--pct", `${pctValue}%`);
+function setFill(slider) {
+  slider.style.setProperty("--pct", `${(slider.value / slider.max) * 100}%`);
 }
 
-function buildSlider(initialValue, onChange) {
+function buildSlider(initialValue, onChange, max = 100) {
   const sliderWrap = document.createElement("span");
   sliderWrap.className = "track-slider";
 
   const slider = document.createElement("input");
   slider.type = "range";
   slider.min = "0";
-  slider.max = "100";
+  slider.max = String(max);
   const initialPct = Math.round(initialValue * 100);
   slider.value = String(initialPct);
-  setFill(slider, initialPct);
+  setFill(slider);
   sliderWrap.appendChild(slider);
 
   const pct = document.createElement("span");
@@ -28,7 +28,7 @@ function buildSlider(initialValue, onChange) {
   slider.addEventListener("input", () => {
     const pctValue = Number(slider.value);
     pct.textContent = `${pctValue}%`;
-    setFill(slider, pctValue);
+    setFill(slider);
     onChange(pctValue / 100);
   });
 
@@ -41,10 +41,18 @@ function buildHint(text) {
   const hint = document.createElement("span");
   hint.className = "grant-hint";
   hint.textContent = text;
+  hint.title = text; // errors can be longer than the row
   return hint;
 }
 
-function buildDeviceLine(tab, sinkId) {
+// Routing changes a row's slider range and Out controls, which the
+// same-tab-set guard in loadTabs would otherwise never re-render.
+function reloadRows() {
+  currentIds = new Set();
+  loadTabs();
+}
+
+function buildDeviceLine(tab, sinkId, routed) {
   const line = document.createElement("div");
   line.className = "track-line";
 
@@ -57,21 +65,66 @@ function buildDeviceLine(tab, sinkId) {
   controlWrap.className = "device-control";
   line.appendChild(controlWrap);
 
-  function renderGrant() {
+  const requestGrant = () =>
+    chrome.runtime.sendMessage({ type: "POPUP_REQUEST_GRANT", tabId: tab.id });
+  const openSetup = () => chrome.tabs.create({ url: "setup.html" });
+  const stopRouting = () =>
+    chrome.runtime
+      .sendMessage({ type: "POPUP_UNROUTE_TAB", tabId: tab.id })
+      .then(reloadRows);
+
+  function renderPill(text, onClick, hintText) {
     controlWrap.innerHTML = "";
     const pill = document.createElement("button");
     pill.type = "button";
     pill.className = "grant-pill";
-    pill.textContent = "Grant on page…";
-    pill.addEventListener("click", () => {
-      chrome.runtime.sendMessage({
-        type: "POPUP_REQUEST_GRANT",
-        tabId: tab.id,
-      });
+    pill.textContent = text;
+    pill.addEventListener("click", onClick);
+    controlWrap.append(pill);
+    if (hintText) controlWrap.append(buildHint(hintText));
+  }
+
+  // chrome.tabCapture only works on the tab the popup was opened over, so
+  // another tab's button brings that tab forward instead.
+  async function routeTab() {
+    const [active] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
     });
-    controlWrap.append(
-      pill,
-      buildHint("click the button that appears on the tab"),
+    if (active?.id !== tab.id) {
+      renderRoute("Open the popup again to route");
+      chrome.tabs.update(tab.id, { active: true });
+      chrome.windows.update(tab.windowId, { focused: true });
+      return;
+    }
+    const mic = await navigator.permissions.query({ name: "microphone" });
+    if (mic.state !== "granted") return openSetup();
+    const res = await chrome.runtime.sendMessage({
+      type: "POPUP_ROUTE_TAB",
+      tabId: tab.id,
+    });
+    if (!res?.ok) throw new Error(res?.error);
+    reloadRows();
+  }
+
+  function renderGrant() {
+    renderPill(
+      "Grant on page…",
+      requestGrant,
+      "click the button that appears on the tab",
+    );
+  }
+
+  function renderRoute(hintText) {
+    renderPill(
+      "Route this tab",
+      () =>
+        routeTab().catch((e) =>
+          renderRoute(
+            e?.message ? `Couldn't route: ${e.message}` : "Couldn't route",
+          ),
+        ),
+      hintText,
     );
   }
 
@@ -80,7 +133,9 @@ function buildDeviceLine(tab, sinkId) {
     controlWrap.append(buildHint(text));
   }
 
-  function renderSelect(devices, canAdd) {
+  // actions: [{label, run}] appended after the devices; picking one runs it
+  // and leaves the current device selected.
+  function renderSelect(devices, actions) {
     controlWrap.innerHTML = "";
     const select = document.createElement("select");
     select.className = "device-select";
@@ -97,22 +152,20 @@ function buildDeviceLine(tab, sinkId) {
       select.appendChild(opt);
     });
 
-    if (canAdd) {
-      const addOpt = document.createElement("option");
-      addOpt.value = "__add__";
-      addOpt.textContent = "Add device…";
-      select.appendChild(addOpt);
-    }
+    actions.forEach(({ label }, i) => {
+      const opt = document.createElement("option");
+      opt.value = `__action${i}__`;
+      opt.textContent = label;
+      select.appendChild(opt);
+    });
 
     select.value = devices.some((d) => d.deviceId === sinkId) ? sinkId : "";
 
     select.addEventListener("change", () => {
-      if (select.value === "__add__") {
-        select.value = sinkId; // granting doesn't itself pick a device
-        chrome.runtime.sendMessage({
-          type: "POPUP_REQUEST_GRANT",
-          tabId: tab.id,
-        });
+      const action = actions[select.selectedIndex - 1 - devices.length];
+      if (action) {
+        select.value = sinkId; // an action doesn't itself pick a device
+        action.run();
         return;
       }
       sinkId = select.value;
@@ -129,19 +182,29 @@ function buildDeviceLine(tab, sinkId) {
   chrome.runtime
     .sendMessage({ type: "POPUP_GET_DEVICES", tabId: tab.id })
     .then(({ granted, devices, supported, reachable = true }) => {
+      // Routed: these are the extension's devices. Without its mic grant
+      // they're unlabelled, so offer setup instead of listing them.
+      if (routed) {
+        const stop = { label: "Stop routing", run: stopRouting };
+        const setup = { label: "Show device names…", run: openSetup };
+        renderSelect(granted ? devices : [], granted ? [stop] : [setup, stop]);
+        return;
+      }
       // Chrome has no selectAudioOutput(); there, a site's mic permission is
       // what unlocks labelled outputs, so check granted before supported.
-      if (granted && devices.length > 0) renderSelect(devices, supported);
-      else if (!reachable) renderHint(UNREACHABLE_HINT);
+      const addDevice = { label: "Add device…", run: requestGrant };
+      if (granted && devices.length > 0) {
+        renderSelect(devices, supported ? [addDevice] : []);
+      } else if (!reachable) renderHint(UNREACHABLE_HINT);
       else if (supported) renderGrant();
-      else renderHint("Allow mic on this site to list outputs");
+      else renderRoute();
     })
     .catch(() => renderHint(UNREACHABLE_HINT));
 
   return line;
 }
 
-function buildRow(tab, volume, sinkId) {
+function buildRow(tab, volume, sinkId, routed) {
   const row = document.createElement("div");
   row.className = "track";
   row.dataset.tabId = tab.id;
@@ -160,25 +223,31 @@ function buildRow(tab, volume, sinkId) {
   title.textContent = tab.title || tab.url || "Untitled tab";
   title.title = tab.title || tab.url || "";
 
-  const { sliderWrap, pct } = buildSlider(volume, (v) => {
-    chrome.runtime.sendMessage({
-      type: "POPUP_SET_VOLUME",
-      tabId: tab.id,
-      volume: v,
-    });
-  });
+  // A routed tab's gain node can boost; an element's volume stops at 1.
+  const { sliderWrap, pct } = buildSlider(
+    volume,
+    (v) => {
+      chrome.runtime.sendMessage({
+        type: "POPUP_SET_VOLUME",
+        tabId: tab.id,
+        volume: v,
+      });
+    },
+    routed ? 200 : 100,
+  );
 
   line.append(icon, title, sliderWrap, pct);
-  row.append(line, buildDeviceLine(tab, sinkId));
+  row.append(line, buildDeviceLine(tab, sinkId, routed));
   return row;
 }
 
 async function loadTabs() {
-  const [tabs, volumes, micState, sinks] = await Promise.all([
+  const [tabs, volumes, micState, sinks, routes] = await Promise.all([
     chrome.tabs.query({}),
     chrome.runtime.sendMessage({ type: "GET_ALL_VOLUMES" }),
     chrome.runtime.sendMessage({ type: "GET_ALL_MIC_STATE" }),
     chrome.runtime.sendMessage({ type: "GET_ALL_SINKS" }),
+    chrome.runtime.sendMessage({ type: "GET_ALL_ROUTES" }),
   ]);
   const micActive = new Set(micState.active);
 
@@ -188,12 +257,14 @@ async function loadTabs() {
         tab.audible ||
         volumes[tab.id] !== undefined ||
         micActive.has(tab.id) ||
-        sinks[tab.id] !== undefined,
+        sinks[tab.id] !== undefined ||
+        routes[tab.id] !== undefined,
     )
     .map((tab) => ({
       tab,
       volume: volumes[tab.id] ?? 1,
-      sinkId: sinks[tab.id] ?? "",
+      sinkId: routes[tab.id]?.sinkId ?? sinks[tab.id] ?? "",
+      routed: routes[tab.id] !== undefined,
     }));
 
   const newIds = new Set(rows.map((r) => r.tab.id));
@@ -208,8 +279,8 @@ async function loadTabs() {
   currentIds = newIds;
   listEl.innerHTML = "";
   emptyEl.style.display = rows.length ? "none" : "block";
-  rows.forEach(({ tab, volume, sinkId }) =>
-    listEl.appendChild(buildRow(tab, volume, sinkId)),
+  rows.forEach(({ tab, volume, sinkId, routed }) =>
+    listEl.appendChild(buildRow(tab, volume, sinkId, routed)),
   );
 }
 

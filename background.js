@@ -3,6 +3,10 @@ let micGain = 1; // applies to mic capture on every site, not per tab
 const micActiveTabs = new Set(); // tabIds with a currently live mic capture
 const tabSinks = new Map(); // tabId -> sinkId ('' = system default)
 const tabSinkDevices = new Map(); // tabId -> {granted, devices, supported} — last known, used as a fallback if the live relay below fails
+// tabId -> {sinkId} for tabs captured and played back by offscreen.js. The
+// sinkId is enumerated by the extension's origin, so it's kept apart from
+// tabSinks (site-origin IDs), which comes back into use on unroute.
+const tabRouted = new Map();
 
 // MV3 stops this worker after ~30s idle, wiping the globals above; any page
 // or frame loading after that got volume 1 from CONTENT_READY, so calls
@@ -23,6 +27,9 @@ const ready = chrome.storage.session
       tabSinkDevices.set(k, v),
     );
     (state.micActiveTabs ?? []).forEach((id) => micActiveTabs.add(id));
+    // The offscreen document and its captures outlive a worker restart, so
+    // this still matches what's playing.
+    toEntries(state.tabRouted).forEach(([k, v]) => tabRouted.set(k, v));
   })
   .catch(() => {});
 
@@ -37,6 +44,7 @@ function persist() {
         tabSinks: Object.fromEntries(tabSinks),
         tabSinkDevices: Object.fromEntries(tabSinkDevices),
         micActiveTabs: [...micActiveTabs],
+        tabRouted: Object.fromEntries(tabRouted),
       },
     })
     .catch(() => {});
@@ -49,6 +57,76 @@ async function broadcastMicGain() {
       .sendMessage(tab.id, { type: "SET_MIC_GAIN", gain: micGain })
       .catch(() => {});
   });
+}
+
+// USER_MEDIA, not AUDIO_PLAYBACK: Chrome closes AUDIO_PLAYBACK documents
+// after 30s of silence, which would end every capture during a pause.
+let creatingOffscreen = null;
+async function ensureOffscreen() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+  });
+  if (contexts.length > 0) return;
+  creatingOffscreen ??= chrome.offscreen
+    .createDocument({
+      url: "offscreen.html",
+      reasons: ["USER_MEDIA"],
+      justification:
+        "Plays back a tab's captured audio at the volume and on the output device the user chose",
+    })
+    .finally(() => {
+      creatingOffscreen = null;
+    });
+  await creatingOffscreen;
+}
+
+// tabCapture needs the extension to have been invoked on the tab (opening
+// the popup over it), so the popup only sends this for its own active tab.
+async function routeTab(tabId) {
+  const streamId = await chrome.tabCapture.getMediaStreamId({
+    targetTabId: tabId,
+  });
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    type: "OFFSCREEN_START",
+    tabId,
+    streamId,
+    gain: tabVolumes.get(tabId) ?? 1,
+  });
+  if (!res?.ok) throw new Error(res?.error || "Playback didn't start");
+  tabRouted.set(tabId, { sinkId: "" });
+  persist();
+  chrome.tabs
+    .sendMessage(tabId, { type: "SET_ROUTED", routed: true })
+    .catch(() => {});
+}
+
+// Fire-and-forget to offscreen.js. Rejects if the document is gone (e.g.
+// nothing has been routed yet), which needs no handling.
+function notifyOffscreen(msg) {
+  chrome.runtime.sendMessage(msg).catch(() => {});
+}
+
+function stopCapture(tabId) {
+  notifyOffscreen({ type: "OFFSCREEN_STOP", tabId });
+}
+
+// Hands the tab back to content.js with its stored volume and in-page sink.
+// Shared by Stop routing and by the capture ending on its own.
+function endRoute(tabId) {
+  if (!tabRouted.delete(tabId)) return;
+  // In-page volume can't boost: el.volume throws above 1.
+  const volume = Math.min(tabVolumes.get(tabId) ?? 1, 1);
+  if (tabVolumes.has(tabId)) tabVolumes.set(tabId, volume);
+  persist();
+  // SET_VOLUME first: content.js applies its stored volume as soon as it's
+  // unrouted, and that may still be a boost value above 1.
+  chrome.tabs
+    .sendMessage(tabId, { type: "SET_VOLUME", volume })
+    .catch(() => {});
+  chrome.tabs
+    .sendMessage(tabId, { type: "SET_ROUTED", routed: false })
+    .catch(() => {});
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -69,19 +147,28 @@ function handleMessage(msg, sender, sendResponse) {
         volume: tabVolumes.get(tabId) ?? 1,
         micGain,
         sinkId: tabSinks.get(tabId) ?? "",
+        routed: tabRouted.has(tabId),
       });
       return true;
     }
-    case "POPUP_GET_VOLUME": {
-      sendResponse({ volume: tabVolumes.get(msg.tabId) ?? 1 });
-      return true;
-    }
     case "POPUP_SET_VOLUME": {
-      tabVolumes.set(msg.tabId, msg.volume);
+      const routed = tabRouted.has(msg.tabId);
+      // Only a routed tab's gain node can boost; a popup row left open after
+      // the route ended can still send up to 2.
+      const volume = routed ? msg.volume : Math.min(msg.volume, 1);
+      tabVolumes.set(msg.tabId, volume);
       persist();
-      chrome.tabs
-        .sendMessage(msg.tabId, { type: "SET_VOLUME", volume: msg.volume })
-        .catch(() => {});
+      if (routed) {
+        notifyOffscreen({
+          type: "OFFSCREEN_SET_GAIN",
+          tabId: msg.tabId,
+          gain: volume,
+        });
+      } else {
+        chrome.tabs
+          .sendMessage(msg.tabId, { type: "SET_VOLUME", volume })
+          .catch(() => {});
+      }
       sendResponse({ ok: true });
       return true;
     }
@@ -91,7 +178,10 @@ function handleMessage(msg, sender, sendResponse) {
     }
     case "VOLUME_DRIFTED": {
       const tabId = sender.tab?.id;
-      if (tabId != null) tabVolumes.set(tabId, msg.volume);
+      // A frame that hasn't seen SET_ROUTED yet must not overwrite the gain.
+      if (tabId != null && !tabRouted.has(tabId)) {
+        tabVolumes.set(tabId, msg.volume);
+      }
       persist();
       return false;
     }
@@ -127,27 +217,72 @@ function handleMessage(msg, sender, sendResponse) {
       return true;
     }
     case "POPUP_GET_DEVICES": {
+      // A routed tab plays from the offscreen document, which can only use
+      // device IDs enumerated by the extension's own origin.
+      const routed = tabRouted.has(msg.tabId);
       const fallback = () =>
-        tabSinkDevices.get(msg.tabId) ?? {
-          granted: false,
-          devices: [],
-          supported: false,
-          reachable: false,
-        };
-      chrome.tabs
-        .sendMessage(msg.tabId, { type: "REQUEST_DEVICE_LIST" })
+        routed
+          ? { granted: false, devices: [] }
+          : (tabSinkDevices.get(msg.tabId) ?? {
+              granted: false,
+              devices: [],
+              supported: false,
+              reachable: false,
+            });
+      (routed
+        ? chrome.runtime.sendMessage({ type: "OFFSCREEN_GET_DEVICES" })
+        : chrome.tabs.sendMessage(msg.tabId, { type: "REQUEST_DEVICE_LIST" })
+      )
         .then((res) => sendResponse(res ?? fallback()))
         .catch(() => sendResponse(fallback()));
       return true;
     }
     case "POPUP_SET_SINK_ID": {
-      tabSinks.set(msg.tabId, msg.sinkId);
+      if (tabRouted.has(msg.tabId)) {
+        tabRouted.set(msg.tabId, { sinkId: msg.sinkId });
+        notifyOffscreen({
+          type: "OFFSCREEN_SET_SINK",
+          tabId: msg.tabId,
+          sinkId: msg.sinkId,
+        });
+      } else {
+        tabSinks.set(msg.tabId, msg.sinkId);
+        chrome.tabs
+          .sendMessage(msg.tabId, { type: "SET_SINK_ID", sinkId: msg.sinkId })
+          .catch(() => {});
+      }
       persist();
-      chrome.tabs
-        .sendMessage(msg.tabId, { type: "SET_SINK_ID", sinkId: msg.sinkId })
-        .catch(() => {});
       sendResponse({ ok: true });
       return true;
+    }
+    case "GET_ALL_ROUTES": {
+      sendResponse(Object.fromEntries(tabRouted));
+      return true;
+    }
+    case "POPUP_ROUTE_TAB": {
+      routeTab(msg.tabId).then(
+        () => sendResponse({ ok: true }),
+        (e) => sendResponse({ ok: false, error: e?.message || String(e) }),
+      );
+      return true;
+    }
+    case "POPUP_UNROUTE_TAB": {
+      stopCapture(msg.tabId);
+      endRoute(msg.tabId);
+      sendResponse({ ok: true });
+      return true;
+    }
+    // From offscreen.js, which has no tab, so the tabId is in the message.
+    case "ROUTE_ENDED": {
+      endRoute(msg.tabId);
+      return false;
+    }
+    case "ROUTE_SINK_UNAVAILABLE": {
+      if (tabRouted.has(msg.tabId)) {
+        tabRouted.set(msg.tabId, { sinkId: "" });
+        persist();
+      }
+      return false;
     }
     case "POPUP_REQUEST_GRANT": {
       chrome.tabs
@@ -196,6 +331,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ready;
+  if (tabRouted.delete(tabId)) stopCapture(tabId);
   tabVolumes.delete(tabId);
   micActiveTabs.delete(tabId);
   tabSinks.delete(tabId);

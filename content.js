@@ -11,6 +11,11 @@
 
   let currentVolume = 1;
   let currentSinkId = "";
+  // While the tab is routed, offscreen.js applies volume and output to the
+  // captured audio, after the page's own volume. Elements stay on the
+  // default device and their volume is left to the page, so the site's own
+  // control (YouTube's slider) keeps working and just multiplies with ours.
+  let routed = false;
   const hookedEls = new WeakSet();
   const observedRoots = new WeakSet();
   let observer;
@@ -34,9 +39,9 @@
 
   function applySink(el) {
     if (typeof el.setSinkId !== "function") return;
-    if (el.sinkId === currentSinkId) return;
-    if (failedSinks.get(el) === currentSinkId) return;
-    const target = currentSinkId;
+    const target = routed ? "" : currentSinkId;
+    if (el.sinkId === target) return;
+    if (failedSinks.get(el) === target) return;
     el.setSinkId(target).catch((e) => {
       failedSinks.set(el, target);
       // Device IDs are origin-scoped, so a cross-origin sub-frame can't
@@ -54,7 +59,7 @@
   }
 
   function apply(el) {
-    el.volume = currentVolume;
+    if (!routed) el.volume = currentVolume;
     applySink(el);
   }
 
@@ -106,6 +111,9 @@
       // An orphan must not revert the live instance's change before its
       // next scan notices and tears down.
       if (contextLost()) return;
+      // Routed: the page owns element volume and the offscreen gain does
+      // ours; adopting this as VOLUME_DRIFTED would overwrite the gain.
+      if (routed) return;
       if (Math.abs(el.volume - currentVolume) <= 0.001) return;
       if (!userIsActing()) {
         // Out of reverts: leave it; the 1s rescan re-applies ours anyway.
@@ -167,6 +175,15 @@
   function setSinkId(id) {
     currentSinkId = id;
     allMedia().forEach(apply);
+  }
+
+  function setRouted(r) {
+    routed = r;
+    allMedia().forEach((el) => {
+      // Undo our in-page attenuation once, or it would stack with the gain.
+      if (r) el.volume = 1;
+      apply(el);
+    });
   }
 
   // The routed device is gone — fall back to system default and tell
@@ -293,6 +310,7 @@
       if (res && typeof res.volume === "number") currentVolume = res.volume;
       if (res && typeof res.micGain === "number") micGain = res.micGain;
       if (res && typeof res.sinkId === "string") currentSinkId = res.sinkId;
+      if (res && typeof res.routed === "boolean") routed = res.routed;
     } catch (e) {
       // Background not reachable (e.g. extension reloading) — default to 1.
     }
@@ -318,6 +336,9 @@
       sendResponse({ ok: true });
     } else if (msg.type === "SET_SINK_ID") {
       setSinkId(msg.sinkId);
+      sendResponse({ ok: true });
+    } else if (msg.type === "SET_ROUTED") {
+      setRouted(msg.routed);
       sendResponse({ ok: true });
     } else if (msg.type === "REQUEST_DEVICE_LIST") {
       // Only the top frame owns the picker/permission flow — a sub-frame
