@@ -52,8 +52,8 @@ popup.js ──runtime.sendMessage──> background.js ──tabs.sendMessage�
 ## Known gaps / candidate work
 
 - Audio routed through Web Audio (`AudioContext.destination`) or detached `new Audio()` elements isn't controlled. The fix would be a MAIN-world hook (patch `HTMLMediaElement.prototype.play` to track detached elements, wrap connections to `destination` with a GainNode). Only build it if a real site needs it. Messenger calls work without it.
-- `manifest.json` description says "including boost above 100%", but the slider caps at 100% because `el.volume` max is 1. Boosting needs a Web Audio gain stage. Either build that or fix the description.
-- `NEXT_BUILD.md`: the "Per-tab output device routing" section is **already shipped** (keep it for rationale or delete it). The "Global microphone input device selection" section is the next planned feature and is not started.
+- Volume caps at 100% because `el.volume` max is 1. Boosting above that needs a Web Audio gain stage. If you build it, update the manifest description (it deliberately doesn't claim boost; the old one did and would have been a Web Store misrepresentation issue).
+- `NEXT_BUILD.md`: "Hybrid tab-capture routing" is the next approved feature. Start with its Phase 0 verification build. "Per-tab output device routing" is **already shipped** (kept for rationale). "Global microphone input device selection" is planned and not started.
 
 ## Testing
 

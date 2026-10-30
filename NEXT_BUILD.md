@@ -1,3 +1,84 @@
+# Hybrid tab-capture routing (opt-in, per tab)
+
+## Context
+Output routing today uses `HTMLMediaElement.setSinkId` inside the page. Chrome only reveals a site's output devices once that **site** has microphone permission, and Chrome has no `selectAudioOutput()`. So routing works on call sites (Messenger, Meet) but not on YouTube or most media sites, where the popup shows "Allow mic on this site to list outputs". The device IDs are also hashed per origin, so the extension can't lend one site's IDs to another.
+
+The user chose a hybrid over a full rewrite. Keep today's content-script path as the default for every tab (volume with no indicator and no extra clicks). Add an opt-in **"Route this tab"** that captures the tab's audio with `chrome.tabCapture` and plays it back through the extension's own `AudioContext`. Chrome then checks the **extension's** device permission, not the site's. A routed tab also gets volume above 100% and coverage of Web Audio and detached `<audio>` elements, which the content-script path can't reach.
+
+Mic gain is unaffected. It handles mic input, not tab output, and keeps using `mic-gain-hook.js`.
+
+## Confirmed platform facts
+- A stream ID from `chrome.tabCapture.getMediaStreamId()` obtained in the service worker can be used in an offscreen document (Chrome 116+). The offscreen document consumes it with `getUserMedia({ audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: id } } })`.
+- Capturing a tab stops its audio playing to the user. The extension must play it back (source → destination), which is exactly where the gain and sink get applied.
+- `AudioContext.setSinkId(deviceId)` exists since Chrome 110. Device IDs come from `enumerateDevices()`, and labels and non-default IDs need microphone permission for the calling origin (here, `chrome-extension://<id>`).
+- Offscreen documents created with reason `AUDIO_PLAYBACK` are closed after 30s without audio. Other reasons have no lifetime limit, so use `USER_MEDIA`.
+
+## Phase 0: verification build (do first, throwaway branch)
+Answer these in a minimal build before writing the real thing. Any "no" changes the design below.
+1. **Invocation rule:** can the service worker get a stream ID for the tab the popup was opened over, using only the existing `<all_urls>` host permission, or does it need `activeTab`? Can it target a non-active tab at all? (Expected: active tab only, after the popup opens.)
+2. **Permission inheritance:** after a visible extension page grants mic once, does the offscreen document see labelled `audiooutput` devices and can it call `AudioContext.setSinkId` without its own prompt? (Offscreen documents are invisible and can't show prompts.)
+3. **Navigation:** does a capture survive a same-tab navigation (e.g. YouTube → another site in the same tab), or does the track end?
+4. **Echo on calls:** route a Messenger call to the laptop speakers and have the other side listen. Does Chrome's echo cancellation still see the played-back audio, or does the other side hear themselves? With headphones this doesn't matter. With speakers it could block routing call tabs.
+5. **Latency:** is lip-sync on YouTube noticeably off?
+6. **Conflicts:** what happens when routing a tab that a call app is already screen-sharing, and on DRM sites (Netflix, Spotify web)?
+
+## Design
+
+### New files
+- **offscreen.html / offscreen.js**: the single audio engine. `routes = Map<tabId, { stream, ctx, gain }>`, one `AudioContext` per routed tab (`setSinkId` is per context). Graph: `MediaStreamSource → GainNode → ctx.destination`. Handles `OFFSCREEN_START {tabId, streamId, gain, sinkId}`, `OFFSCREEN_SET_GAIN`, `OFFSCREEN_SET_SINK`, `OFFSCREEN_STOP`, and `OFFSCREEN_GET_DEVICES` (enumerates from the extension origin). When a captured track ends (tab closed, or navigation if Phase 0 says so), it sends `ROUTE_ENDED {tabId}` and cleans up.
+- **setup.html / setup.js**: a one-time visible page that calls `getUserMedia({audio: true})`, stops the tracks immediately, and says "Done, you can close this tab". This only unlocks device names for the extension; it never records. It reuses popup styling where possible instead of new CSS.
+
+### background.js
+- New state `tabRouted = Map<tabId, { sinkId }>`, added to both `persist()` and the `ready` restore (see AGENTS.md: forgetting either means it silently resets when the worker restarts). Cleared in `tabs.onRemoved` and on `ROUTE_ENDED`.
+- `ensureOffscreen()`: create the document with reason `USER_MEDIA` if it doesn't exist (`chrome.offscreen.hasDocument` / `runtime.getContexts`).
+- `POPUP_ROUTE_TAB {tabId}`: `getMediaStreamId({targetTabId})` → `ensureOffscreen()` → `OFFSCREEN_START` with the tab's stored volume as the gain → tell the tab `SET_ROUTED {routed: true}`.
+- `POPUP_SET_VOLUME` / `POPUP_SET_SINK_ID`: if the tab is routed, forward to the offscreen document instead of the content script.
+- `POPUP_UNROUTE_TAB`: `OFFSCREEN_STOP`, then `SET_ROUTED {routed: false}` so the content-script path takes over again with the stored volume and sink.
+- On a worker restart the offscreen document and its captures keep running (separate context), so the restored `tabRouted` still matches reality. After a browser restart both are gone, and `storage.session` is cleared anyway.
+
+### content.js
+- `SET_ROUTED {routed}`: while routed, force `el.volume = 1`, reset the sink to `""`, and skip drift handling. The offscreen gain is applied after the page's own volume, so Messenger setting 100% no longer matters and nothing needs reverting. On unroute, resume normal `apply()` with the stored values.
+- Only a flag checked in `apply()` and the `volumechange` listener, not a second code path.
+
+### popup.js
+- In the Out row, where it shows "Allow mic on this site to list outputs" today, show a **"Route this tab"** button instead.
+  - Active tab: start routing. If the extension lacks mic permission (`navigator.permissions.query({name: "microphone"})` from the popup), open `setup.html` first.
+  - Non-active tab: the button focuses that tab (`tabs.update` + `windows.update`) with the hint "Open the popup again to route". This follows Chrome's invocation rule (Phase 0, item 1).
+- A routed row shows a device dropdown from `OFFSCREEN_GET_DEVICES` and a "Stop routing" option at the bottom. The slider max goes to 200% and the readout shows the boost.
+- Tabs where the site already has mic permission (Facebook today) keep the current in-page routing. No capture indicator for them.
+
+### manifest.json
+- Add `"tabCapture"` and `"offscreen"`, plus `"activeTab"` if Phase 0 shows it's needed.
+
+## Edge cases
+- **Routed tab closes:** `ROUTE_ENDED` / `tabs.onRemoved` stop the context and clear state.
+- **Routed device unplugged:** the offscreen `devicechange` handler falls back to `setSinkId("")` for every context on that device and reports it, same as `SINK_DEVICE_UNAVAILABLE` today.
+- **Extension reload:** captures die with the old offscreen document, and `storage.session` clears. Tabs fall back to the content-script path at defaults. The user re-routes (an accepted limitation of the invocation rule).
+- **Mic permission revoked for the extension later:** the device list goes back to default only, and the row shows the setup button again.
+- **Two windows:** the invocation rule is per tab, so each routed tab needs its own popup open while active.
+
+## Store and privacy impact
+- `PRIVACY.md` needs a new section: "When you route a tab, the extension captures that tab's audio and plays it back to the device you chose. Audio is never recorded, stored, or sent." The permissions table gains `tabCapture`, `offscreen`, and the one-time mic grant used to list devices.
+- `tabCapture` is a sensitive permission. Expect a longer review and write the justification around the user-initiated, per-tab, play-back-only behavior.
+- README limitations: routed tabs show Chrome's capture indicator; routing needs the popup opened on that tab after each browser restart.
+
+## Out of scope
+- Replacing the content-script path for unrouted tabs.
+- Remembering routes across browser restarts (Chrome requires a fresh user invocation anyway).
+- Boost for unrouted tabs.
+
+## Verification
+1. Phase 0 answers recorded at the top of this section before building.
+2. Reload the extension. On YouTube (no site mic permission), click "Route this tab" → setup page → grant → reopen popup → route to Bluetooth while a Messenger call stays on built-in speakers. Both play correctly at their own volume.
+3. Set YouTube to 150% and confirm it's louder than 100%.
+4. On a routed Messenger call, have someone join or leave. Volume stays put.
+5. Stop routing. The tab returns to the default device at its previous volume with no gap longer than a moment.
+6. Close a routed tab. No orphaned `AudioContext` remains (check `chrome://media-internals` or the offscreen document's console).
+7. Unplug the routed device mid-playback. That tab falls back to the default device, and the others don't change.
+8. Leave the popup closed for over a minute so the service worker stops. Routed tabs keep playing, and the popup still shows them as routed.
+
+---
+
 # Per-tab output device routing (Tab Volume Mixer)
 
 ## Context
