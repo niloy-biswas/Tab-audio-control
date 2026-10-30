@@ -15,12 +15,21 @@ Mic gain is unaffected. It handles mic input, not tab output, and keeps using `m
 
 ## Phase 0: verification build (do first, throwaway branch)
 Answer these in a minimal build before writing the real thing. Any "no" changes the design below.
+
+The feature was built on `feat/hybrid-tab-capture` before these were answered, so it's designed to hold up either way: `activeTab` is in the manifest, only the popup's own tab is routed, a captured track ending hands the tab back to content.js, and route failures show their reason in the popup. Each item's status below records what has been tested since.
+
 1. **Invocation rule:** can the service worker get a stream ID for the tab the popup was opened over, using only the existing `<all_urls>` host permission, or does it need `activeTab`? Can it target a non-active tab at all? (Expected: active tab only, after the popup opens.)
+   - Status: partly verified 2026-10-31. Routing the tab the popup was opened over works with `activeTab` in the manifest. Not tested: host permission alone, or targeting a non-active tab.
 2. **Permission inheritance:** after a visible extension page grants mic once, does the offscreen document see labelled `audiooutput` devices and can it call `AudioContext.setSinkId` without its own prompt? (Offscreen documents are invisible and can't show prompts.)
+   - Status: verified 2026-10-31. After the setup page grant, the offscreen document lists labelled outputs, and picking another device moves a routed tab's audio there while other tabs stay put.
 3. **Navigation:** does a capture survive a same-tab navigation (e.g. YouTube → another site in the same tab), or does the track end?
+   - Status: unverified, needs manual test
 4. **Echo on calls:** route a Messenger call to the laptop speakers and have the other side listen. Does Chrome's echo cancellation still see the played-back audio, or does the other side hear themselves? With headphones this doesn't matter. With speakers it could block routing call tabs.
+   - Status: verified 2026-10-31. A routed Messenger call on the laptop speakers produced no echo for the other side.
 5. **Latency:** is lip-sync on YouTube noticeably off?
+   - Status: unverified, needs manual test
 6. **Conflicts:** what happens when routing a tab that a call app is already screen-sharing, and on DRM sites (Netflix, Spotify web)?
+   - Status: unverified, needs manual test
 
 ## Design
 
@@ -37,7 +46,7 @@ Answer these in a minimal build before writing the real thing. Any "no" changes 
 - On a worker restart the offscreen document and its captures keep running (separate context), so the restored `tabRouted` still matches reality. After a browser restart both are gone, and `storage.session` is cleared anyway.
 
 ### content.js
-- `SET_ROUTED {routed}`: while routed, force `el.volume = 1`, reset the sink to `""`, and skip drift handling. The offscreen gain is applied after the page's own volume, so Messenger setting 100% no longer matters and nothing needs reverting. On unroute, resume normal `apply()` with the stored values.
+- `SET_ROUTED {routed}`: on route, set `el.volume = 1` once and then leave element volume to the page (built: forcing it every rescan made YouTube's own slider snap back), reset the sink to `""`, and skip drift handling. The offscreen gain is applied after the page's own volume, so Messenger setting 100% no longer matters and nothing needs reverting. On unroute, resume normal `apply()` with the stored values.
 - Only a flag checked in `apply()` and the `volumechange` listener, not a second code path.
 
 ### popup.js
