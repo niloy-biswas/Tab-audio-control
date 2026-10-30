@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Tab Audio Control",
   "version": "1.0.0",
-  "description": "Per-tab volume control, including boost above 100%.",
+  "description": "Set volume and output device for each tab, and adjust your microphone level on calls.",
   "permissions": ["tabs", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "icons": {
