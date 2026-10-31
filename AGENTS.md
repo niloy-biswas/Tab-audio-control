@@ -70,7 +70,8 @@ These came up while building routing. 8 and 9 haven't been seen in a real browse
 - Unrouted tabs cap at 100% because `el.volume` max is 1. Routed tabs go to 200% through the offscreen gain node. The manifest description still doesn't claim boost (the old one did and would have been a Web Store misrepresentation issue). Only claim it if boost works for every tab.
 - While routed, `apply()` leaves element volume alone (set to 1 once in `setRouted`), so a site's own control multiplies with the offscreen gain. The popup only shows the gain, not the combined level.
 - A routed tab's fullscreen is confined to the browser window, with the toolbar still showing (verified 2026-10-31). Chrome decides this when fullscreen is entered while the tab is captured. Known workaround (Volume Master's): start the capture after the video is already fullscreen, which needs a keyboard shortcut since opening the popup leaves fullscreen. A `commands` shortcut was built and dropped on 2026-11-01: Aside, the Chromium fork the user tests in, lists extension shortcuts but never delivered the command, and the user decided it wasn't needed.
-- `NEXT_BUILD.md`: "Hybrid tab-capture routing" is built. Phase 0 items 2 and 4 are verified, item 1 partly; items 3, 5 and 6 (navigation, latency, conflicts) are still untested. "Per-tab output device routing" is **already shipped** (kept for rationale). "Global microphone input device selection" is planned and not started.
+- Routing checks never run in a real browser: whether a capture survives navigating the tab to another site (Testing, step 10), lip-sync latency on video, and what happens on a tab a call app is already screen-sharing or on DRM sites (Netflix, Spotify web).
+- Idea, not started: choosing the global microphone *input* device from the Mic section (swap the source node in `mic-gain-hook.js`'s graph, keeping the destination track so the call never renegotiates). Full design: `git show 9d79116:NEXT_BUILD.md`.
 
 ## Testing
 
@@ -83,7 +84,7 @@ These came up while building routing. 8 and 9 haven't been seen in a real browse
 7. Click "Route this tab" on a row that isn't the active tab. It should switch to that tab and show "Open the popup again to route", not fail silently. On a `chrome://` page or after something goes wrong, the row should show "Couldn't route: <reason>".
 8. Stop routing: the tab returns to its in-page sink at its previous volume (capped at 100%). Close a routed tab: no orphaned `AudioContext` in the offscreen document's console (`chrome://extensions` → Inspect views: offscreen.html).
 9. Leave the popup closed for over a minute so the worker stops. The routed tab keeps playing, and the popup still shows it as routed.
-10. Navigate a routed tab to another site and note whether the capture survives (Phase 0, item 3). Either way the popup should match: still routed, or back to normal.
+10. Navigate a routed tab to another site and note whether the capture survives. Either way the popup should match: still routed, or back to normal.
 
 ## Icons
 

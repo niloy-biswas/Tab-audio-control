@@ -66,4 +66,3 @@ Tabs that were already open get the extension's scripts added automatically when
 | `tests/` | Mock tests for the scripts, run with Node and no dependencies (see AGENTS.md) |
 | `docs/` | Images used by this README |
 | `PRIVACY.md` | Privacy policy, used as the Chrome Web Store privacy policy URL |
-| `NEXT_BUILD.md` | Design notes for planned features |
