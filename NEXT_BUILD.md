@@ -12,6 +12,7 @@ Mic gain is unaffected. It handles mic input, not tab output, and keeps using `m
 - Capturing a tab stops its audio playing to the user. The extension must play it back (source → destination), which is exactly where the gain and sink get applied.
 - `AudioContext.setSinkId(deviceId)` exists since Chrome 110. Device IDs come from `enumerateDevices()`, and labels and non-default IDs need microphone permission for the calling origin (here, `chrome-extension://<id>`).
 - Offscreen documents created with reason `AUDIO_PLAYBACK` are closed after 30s without audio. Other reasons have no lifetime limit, so use `USER_MEDIA`.
+- **Fullscreen** (verified by the user 2026-10-31): while a tab is captured, Chrome confines its fullscreen video to the browser window and the toolbar stays visible. Not mitigated; documented in README limitations. A keyboard shortcut to start capture after entering fullscreen was tried and dropped (see AGENTS.md known gaps).
 
 ## Phase 0: verification build (do first, throwaway branch)
 Answer these in a minimal build before writing the real thing. Any "no" changes the design below.
