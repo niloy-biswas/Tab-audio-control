@@ -2,7 +2,7 @@
 // capture goes MediaStreamSource -> GainNode -> destination here, which is
 // where the tab's volume (up to 2x) and output device get applied. One
 // AudioContext per tab, because setSinkId is per context.
-const routes = new Map(); // tabId -> {stream, ctx, gain, sinkId}
+const routes = new Map(); // tabId -> {stream, ctx, gain, sinkId, recoveredAt}
 
 function stop(tabId) {
   const route = routes.get(tabId);
@@ -12,6 +12,13 @@ function stop(tabId) {
   route.ctx.close().catch(() => {});
 }
 
+// Ends a capture we didn't stop ourselves and tells background, which hands
+// the tab back to content.js so the page plays normally again.
+function handBack(tabId) {
+  stop(tabId);
+  chrome.runtime.sendMessage({ type: "ROUTE_ENDED", tabId }).catch(() => {});
+}
+
 async function start({ tabId, streamId, gain }) {
   stop(tabId);
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -19,22 +26,47 @@ async function start({ tabId, streamId, gain }) {
       mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId },
     },
   });
-  const ctx = new AudioContext();
-  const gainNode = ctx.createGain();
-  gainNode.gain.value = gain;
-  ctx
-    .createMediaStreamSource(stream)
-    .connect(gainNode)
-    .connect(ctx.destination);
-  const route = { stream, ctx, gain: gainNode, sinkId: "" };
+  const route = { stream, sinkId: "" };
+  buildGraph(tabId, route, gain);
   routes.set(tabId, route);
   // The tab closed (or navigated, if Chrome ends captures on that). Our own
   // stop() doesn't fire "ended", so this only reports captures we didn't end.
   stream.getAudioTracks()[0]?.addEventListener("ended", () => {
-    if (routes.get(tabId) !== route) return;
-    stop(tabId);
-    chrome.runtime.sendMessage({ type: "ROUTE_ENDED", tabId }).catch(() => {});
+    if (routes.get(tabId) === route) handBack(tabId);
   });
+}
+
+// (Re)builds a route's graph on the default device.
+function buildGraph(tabId, route, gain) {
+  const ctx = new AudioContext();
+  const gainNode = ctx.createGain();
+  gainNode.gain.value = gain;
+  ctx
+    .createMediaStreamSource(route.stream)
+    .connect(gainNode)
+    .connect(ctx.destination);
+  route.ctx = ctx;
+  route.gain = gainNode;
+  ctx.addEventListener("error", () => recover(tabId, route, ctx));
+}
+
+// The device or renderer failed (Bluetooth switching profiles, unplug,
+// sleep), which leaves the context silent while the tab stays captured and
+// muted. Rebuild once and retry the chosen device; if it fails again soon,
+// hand the tab back to the page rather than leave it silent.
+const RECOVERY_WINDOW_MS = 5000;
+function recover(tabId, route, failedCtx) {
+  if (routes.get(tabId) !== route || route.ctx !== failedCtx) return;
+  failedCtx.close().catch(() => {});
+  const now = Date.now();
+  if (now - (route.recoveredAt ?? 0) < RECOVERY_WINDOW_MS) {
+    return handBack(tabId);
+  }
+  route.recoveredAt = now;
+  const sinkId = route.sinkId;
+  route.sinkId = "";
+  buildGraph(tabId, route, route.gain.gain.value);
+  if (sinkId) setSink(tabId, sinkId);
 }
 
 // Same fallback as content.js's resetSinkToDefault, for one routed tab.

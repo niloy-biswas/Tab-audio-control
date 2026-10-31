@@ -46,6 +46,7 @@ Tabs that were already open get the extension's scripts added automatically when
 - On tabs that aren't routed, volume and output only reach `<audio>` and `<video>` elements in the page, including ones inside open shadow roots. Audio played through the Web Audio API, or through an audio element that's never added to the page, won't respond. Routing the tab covers those.
 - Volume can't go above 100% unless the tab is routed. The browser caps `HTMLMediaElement.volume` at 1.
 - A routed tab shows Chrome's capture indicator while it's routed.
+- A routed tab can't go truly fullscreen: Chrome keeps its fullscreen video inside the browser window, with the toolbar still showing. Stop routing before watching fullscreen.
 - You can only route the tab the popup was opened over. Chrome requires that each time a capture starts, so after a browser restart or extension reload you have to route the tab again.
 - While a tab is routed, the site's own volume control still works and combines with the popup slider (50% on the site and 50% in the popup plays at 25%).
 - Mic gain doesn't affect a mic stream that started before the extension loaded. Rejoin the call to pick it up.
@@ -62,6 +63,6 @@ Tabs that were already open get the extension's scripts added automatically when
 | `setup.html` / `setup.js` | One-time page that asks for microphone permission for the extension, so it can list output device names. Stops the mic straight away |
 | `popup.html` / `popup.js` / `popup.css` | The popup UI. `setup.html` reuses `popup.css` |
 | `icons/` | Extension icon. `icon.svg` is the source for 32/48/128, and `icon-16.svg` is a simpler version for the toolbar |
+| `tests/` | Mock tests for the scripts, run with Node and no dependencies (see AGENTS.md) |
 | `docs/` | Images used by this README |
 | `PRIVACY.md` | Privacy policy, used as the Chrome Web Store privacy policy URL |
-| `NEXT_BUILD.md` | Design notes for planned features |

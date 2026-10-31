@@ -4,9 +4,10 @@ Context for coding agents working on this repo. Read README.md first for what th
 
 ## Project shape
 
-- Chrome MV3 extension, plain JS, no build step, no dependencies, no tests, no linter config.
+- Chrome MV3 extension, plain JS, no build step, no dependencies, no linter config.
 - Syntax check: `for f in *.js; do node --check "$f"; done`.
-- Real verification means loading it unpacked in Chrome (see "Testing" below). There is no automated way to exercise audio here.
+- Mock tests: `for t in tests/*-test.js; do node "$t" || exit 1; done`. Each file loads one source file into a fake `chrome`/DOM and asserts the message flow; pass a path (`node tests/bg-test.js /tmp/copy.js`) to run it against a modified copy and confirm a test can fail. No test framework, just Node's `assert`. When you fix a bug, add a case that fails without the fix.
+- Real verification still means loading it unpacked in Chrome (see "Testing" below). The mocks can't exercise actual audio, devices, permissions, or fullscreen.
 
 ## Architecture
 
@@ -57,17 +58,20 @@ popup.js ──runtime.sendMessage──> background.js ──tabs.sendMessage�
 6. **Volume sync is two-way, but only for user-driven changes.** The `volumechange` listener adopts a page-side volume change only if the user touched the page in the last 1s (or is holding the pointer down, for slider drags). Otherwise the change came from page code, e.g. Messenger setting a new participant's `<audio>` to 1, and gets reverted. Reverts are capped at 5/sec per element so a page that re-asserts its volume can't loop with us. Before this, call audio jumped back to 100% mid-call.
 7. **The popup skips re-rendering when the set of tabs is unchanged** (`loadTabs`), so a slider drag isn't interrupted. If you add per-row live state, update it in place rather than relying on a re-render. Routing and unrouting call `reloadRows()`, which forces one re-render, because they change the row's slider range and Out controls.
 
-These two came up while building routing and haven't been seen in a real browser yet:
+These came up while building routing. 8 and 9 haven't been seen in a real browser yet:
 
 8. **`runtime.sendMessage` reaches every extension page**, including the offscreen document and an open popup or setup tab. `offscreen.js` must ignore anything that isn't `OFFSCREEN_*` and never respond to it, or its empty reply can beat background's. For the same reason the popup must not message the offscreen document directly: background's listener replies to every message, including unknown ones, so it would race the offscreen reply. Go through background.
 9. **Routed volume goes up to 2, but `el.volume` throws above 1.** Background clamps when a route ends (`endRoute`) and for unrouted tabs in `POPUP_SET_VOLUME`, which covers a popup row left open after the route ended. `endRoute` also sends `SET_VOLUME` before `SET_ROUTED {routed: false}`. In the other order, content.js would briefly apply its old boost value and throw.
+10. **An `AudioContext` can die mid-route.** Chrome fires `error` on the context ("The AudioContext encountered an error from the audio device or the WebAudio renderer") on things like a Bluetooth profile switch, unplug, or sleep, and the context goes silent while the tab stays captured and muted. `offscreen.js` `recover()` rebuilds the graph from the same capture stream, carries the gain over, and retries the chosen sink; a second failure within 5s stops the capture and sends `ROUTE_ENDED` so the page plays normally again. Seen in a real browser 2026-10-31.
 
 ## Known gaps / candidate work
 
 - On unrouted tabs, audio played through Web Audio (`AudioContext.destination`) or detached `new Audio()` elements isn't controlled. Routing the tab covers it. A MAIN-world hook (patch `HTMLMediaElement.prototype.play` to track detached elements, wrap connections to `destination` with a GainNode) would cover it without capture. Only build that if a real site needs it. Messenger calls work without it.
 - Unrouted tabs cap at 100% because `el.volume` max is 1. Routed tabs go to 200% through the offscreen gain node. The manifest description still doesn't claim boost (the old one did and would have been a Web Store misrepresentation issue). Only claim it if boost works for every tab.
 - While routed, `apply()` leaves element volume alone (set to 1 once in `setRouted`), so a site's own control multiplies with the offscreen gain. The popup only shows the gain, not the combined level.
-- `NEXT_BUILD.md`: "Hybrid tab-capture routing" is built. Phase 0 items 2 and 4 are verified, item 1 partly; items 3, 5 and 6 (navigation, latency, conflicts) are still untested. "Per-tab output device routing" is **already shipped** (kept for rationale). "Global microphone input device selection" is planned and not started.
+- A routed tab's fullscreen is confined to the browser window, with the toolbar still showing (verified 2026-10-31). Chrome decides this when fullscreen is entered while the tab is captured. Known workaround (Volume Master's): start the capture after the video is already fullscreen, which needs a keyboard shortcut since opening the popup leaves fullscreen. A `commands` shortcut was built and dropped on 2026-11-01: Aside, the Chromium fork the user tests in, lists extension shortcuts but never delivered the command, and the user decided it wasn't needed.
+- Routing checks never run in a real browser: whether a capture survives navigating the tab to another site (Testing, step 10), lip-sync latency on video, and what happens on a tab a call app is already screen-sharing or on DRM sites (Netflix, Spotify web).
+- Idea, not started: choosing the global microphone *input* device from the Mic section (swap the source node in `mic-gain-hook.js`'s graph, keeping the destination track so the call never renegotiates). Full design: `git show 9d79116:NEXT_BUILD.md`.
 
 ## Testing
 
@@ -80,7 +84,7 @@ These two came up while building routing and haven't been seen in a real browser
 7. Click "Route this tab" on a row that isn't the active tab. It should switch to that tab and show "Open the popup again to route", not fail silently. On a `chrome://` page or after something goes wrong, the row should show "Couldn't route: <reason>".
 8. Stop routing: the tab returns to its in-page sink at its previous volume (capped at 100%). Close a routed tab: no orphaned `AudioContext` in the offscreen document's console (`chrome://extensions` → Inspect views: offscreen.html).
 9. Leave the popup closed for over a minute so the worker stops. The routed tab keeps playing, and the popup still shows it as routed.
-10. Navigate a routed tab to another site and note whether the capture survives (Phase 0, item 3). Either way the popup should match: still routed, or back to normal.
+10. Navigate a routed tab to another site and note whether the capture survives. Either way the popup should match: still routed, or back to normal.
 
 ## Icons
 
